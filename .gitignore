@@ -4,3 +4,4 @@ __pycache__/
 venv/
 listings*.csv
 .pw-profile/
+debug_page*.html

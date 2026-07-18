@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import random
 import re
 import sys
@@ -50,8 +51,29 @@ except ImportError:  # not exposed in some playwright versions
     TargetClosedError = PlaywrightError
 
 BASE_URL = "https://www.propertyguru.com.sg"
-# property_type=N is PropertyGuru's code for Condo/Apartment.
-SEARCH_PATH = "/property-for-sale/{page}?property_type=N&listing_type=sale"
+
+
+def build_search_url(page_no: int, districts: list[str]) -> str:
+    # property_type=N is PropertyGuru's code for Condo/Apartment.
+    url = f"{BASE_URL}/property-for-sale/{page_no}?property_type=N&listing_type=sale"
+    for district in districts:
+        url += f"&district_code[]={district}"
+    return url
+
+
+def normalize_districts(spec: str) -> list[str]:
+    """Turn 'D9, 15, d21' into ['D09', 'D15', 'D21'] (validated D01-D28)."""
+    districts = []
+    for part in spec.replace(" ", "").split(","):
+        if not part:
+            continue
+        m = re.fullmatch(r"[Dd]?(\d{1,2})", part)
+        if not m or not 1 <= int(m.group(1)) <= 28:
+            raise SystemExit(
+                f"Invalid district {part!r}: use D01-D28, e.g. --districts D09,D15"
+            )
+        districts.append(f"D{int(m.group(1)):02d}")
+    return districts
 
 # Browser profile kept between runs so a solved bot check is remembered.
 PROFILE_DIR = Path(__file__).resolve().parent / ".pw-profile"
@@ -84,8 +106,9 @@ PRICE_RE = re.compile(r"S\$\s*([\d,]+)")
 AREA_RE = re.compile(r"([\d,]+)\s*sq\s*ft", re.IGNORECASE)
 PSF_RE = re.compile(r"S\$\s*([\d,]+(?:\.\d+)?)\s*psf", re.IGNORECASE)
 TENURE_RE = re.compile(r"(Freehold|\d{2,4}[- ]?(?:yr|year)s?\s*Leasehold|Leasehold)", re.IGNORECASE)
-BEDS_RE = re.compile(r"(\d+)\s*Beds?\b", re.IGNORECASE)
-BATHS_RE = re.compile(r"(\d+)\s*Baths?\b", re.IGNORECASE)
+BEDS_RE = re.compile(r"(\d+)\s*(?:Beds?|BR)\b", re.IGNORECASE)
+BATHS_RE = re.compile(r"(\d+)\s*(?:Baths?|BA)\b", re.IGNORECASE)
+STUDIO_RE = re.compile(r"\bStudio\b", re.IGNORECASE)
 MRT_RE = re.compile(
     r"(\d+)\s*mins?\s*\(([\d,]+)\s*m\)\s*(?:from|to)\s*([^\n|]+)", re.IGNORECASE
 )
@@ -104,6 +127,9 @@ def parse_card_text(text: str, listing: Listing) -> None:
     listing.tenure = _first(TENURE_RE, text).title()
     listing.bedrooms = _first(BEDS_RE, text)
     listing.bathrooms = _first(BATHS_RE, text)
+
+    if not listing.bedrooms and STUDIO_RE.search(text):
+        listing.bedrooms = "Studio"
 
     mrt = MRT_RE.search(text)
     if mrt:
@@ -178,6 +204,104 @@ def scrape_card(card) -> Listing | None:
     return listing
 
 
+# --------------------------------------------- embedded-JSON fallback data
+#
+# PropertyGuru renders its cards from JSON embedded in <script> tags. Cards
+# often show bed/bath counts only as bare numbers beside icons (and omit
+# MRT info for some layouts), so we also mine that JSON and use it to fill
+# any fields the visible text didn't yield.
+
+BED_KEYS = {"bedrooms", "beds", "bedroom", "bedroomscount"}
+BATH_KEYS = {"bathrooms", "baths", "bathroom", "bathroomscount"}
+ID_KEYS = {"id", "listingid"}
+
+
+def _collect_listing_dicts(node, out) -> None:
+    if isinstance(node, dict):
+        lowered = {k.lower() for k in node}
+        if lowered & BED_KEYS and lowered & BATH_KEYS:
+            out.append(node)
+        for value in node.values():
+            _collect_listing_dicts(value, out)
+    elif isinstance(node, list):
+        for value in node:
+            _collect_listing_dicts(value, out)
+
+
+def _flatten_strings(node, out, depth=0) -> None:
+    if depth > 6:
+        return
+    if isinstance(node, dict):
+        for value in node.values():
+            _flatten_strings(value, out, depth + 1)
+    elif isinstance(node, list):
+        for value in node:
+            _flatten_strings(value, out, depth + 1)
+    elif isinstance(node, str):
+        out.append(node)
+
+
+def page_json_details(page) -> dict:
+    """Map listing id -> {bedrooms, bathrooms, mrt} mined from page JSON."""
+    details: dict[str, dict] = {}
+    for script in page.query_selector_all("script"):
+        text = script.text_content() or ""
+        if len(text) < 200 or "bathroom" not in text.lower():
+            continue
+        try:
+            data = json.loads(text)
+        except ValueError:
+            continue
+        records: list[dict] = []
+        _collect_listing_dicts(data, records)
+        for record in records:
+            entry: dict[str, str] = {}
+            lid = ""
+            for key, value in record.items():
+                kl = key.lower()
+                if kl in ID_KEYS and isinstance(value, (str, int)):
+                    lid = str(value)
+                elif kl in BED_KEYS:
+                    if value == 0 or value == "0":
+                        entry["bedrooms"] = "Studio"
+                    elif value not in (None, ""):
+                        entry["bedrooms"] = str(value)
+                elif kl in BATH_KEYS and value not in (None, "", 0):
+                    entry["bathrooms"] = str(value)
+                elif "mrt" in kl and value:
+                    strings: list[str] = []
+                    _flatten_strings(value, strings)
+                    joined = " | ".join(strings)
+                    m = MRT_RE.search(joined)
+                    if m:
+                        mins, metres, station = m.groups()
+                        entry["mrt"] = f"{mins} min ({metres} m) to {station.strip()}"
+                    else:
+                        for s in strings:
+                            if "mrt" in s.lower():
+                                entry["mrt"] = s.strip()
+                                break
+            if lid and entry:
+                details.setdefault(lid, {}).update(entry)
+    return details
+
+
+def fill_from_json(listing: Listing, card, json_details: dict) -> None:
+    lid = card.get_attribute("data-listing-id") or ""
+    if not lid and listing.url:
+        m = re.search(r"(\d{6,})", listing.url)
+        lid = m.group(1) if m else ""
+    info = json_details.get(lid)
+    if not info:
+        return
+    if not listing.bedrooms:
+        listing.bedrooms = info.get("bedrooms", "")
+    if not listing.bathrooms:
+        listing.bathrooms = info.get("bathrooms", "")
+    if not listing.mrt_proximity:
+        listing.mrt_proximity = info.get("mrt", "")
+
+
 def looks_blocked(page) -> bool:
     title = (page.title() or "").lower()
     body = ""
@@ -235,8 +359,12 @@ def wait_out_bot_check(page, headful: bool) -> bool:
     return not looks_blocked(page)
 
 
-def scrape(max_pages: int, output: str, headful: bool, delay: float) -> int:
+def scrape(max_pages: int, output: str, headful: bool, delay: float,
+           districts: list[str] | None = None, debug: bool = False) -> int:
     listings: list[Listing] = []
+    districts = districts or []
+    if districts:
+        print(f"Filtering to districts: {', '.join(districts)}")
 
     with sync_playwright() as p:
         context = open_browser(p, headful)
@@ -244,7 +372,7 @@ def scrape(max_pages: int, output: str, headful: bool, delay: float) -> int:
 
         try:
             for page_no in range(1, max_pages + 1):
-                url = BASE_URL + SEARCH_PATH.format(page=page_no)
+                url = build_search_url(page_no, districts)
                 print(f"[page {page_no}/{max_pages}] {url}")
                 try:
                     page.goto(url, wait_until="domcontentloaded", timeout=60_000)
@@ -258,16 +386,26 @@ def scrape(max_pages: int, output: str, headful: bool, delay: float) -> int:
                     print("    from a residential connection and solve the check once.")
                     break
 
+                if debug and page_no == 1:
+                    debug_file = "debug_page1.html"
+                    with open(debug_file, "w", encoding="utf-8") as fh:
+                        fh.write(page.content())
+                    print(f"  (debug: saved page HTML to {debug_file})")
+
                 cards = extract_cards(page)
                 if not cards:
                     print("  ! no listing cards found — page layout may have changed,")
                     print("    or this was the last page of results.")
                     break
 
+                json_details = page_json_details(page)
+
                 found = 0
                 for card in cards:
                     try:
                         listing = scrape_card(card)
+                        if listing:
+                            fill_from_json(listing, card, json_details)
                     except Exception as exc:  # one bad card shouldn't kill the run
                         print(f"  ! failed to parse a card: {exc}")
                         continue
@@ -312,8 +450,15 @@ def main() -> int:
                         help="show the browser window (needed to solve bot checks)")
     parser.add_argument("--delay", type=float, default=8.0,
                         help="base delay in seconds between pages (default: 8)")
+    parser.add_argument("--districts", default="",
+                        help="only these postal districts, comma-separated "
+                             "(e.g. D09,D15,D19)")
+    parser.add_argument("--debug", action="store_true",
+                        help="save the first results page as debug_page1.html "
+                             "to help diagnose missing fields")
     args = parser.parse_args()
-    return scrape(args.max_pages, args.output, args.headful, args.delay)
+    return scrape(args.max_pages, args.output, args.headful, args.delay,
+                  normalize_districts(args.districts), args.debug)
 
 
 if __name__ == "__main__":

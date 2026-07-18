@@ -33,6 +33,20 @@ Options:
 | `--output` | `listings.csv` | where to save the CSV |
 | `--headful` | off | show the browser window (use this if a "verify you are human" check appears — solve it once and the scrape continues) |
 | `--delay` | 8 | base seconds to wait between pages, to scrape politely |
+| `--districts` | all | only scrape these postal districts, e.g. `--districts D09,D15,D19` |
+| `--debug` | off | save the first results page as `debug_page1.html` to diagnose missing fields |
+
+### Filtering by area
+
+Singapore property is organised by postal districts D01–D28 (PropertyGuru
+doesn't filter by GRC — districts are the property-market equivalent).
+Some common ones: D09 Orchard/River Valley, D10 Bukit Timah/Holland,
+D15 Katong/Marine Parade, D19 Serangoon/Hougang/Punggol, D23 Bukit
+Batok/Choa Chu Kang. Example:
+
+```bash
+python propertyguru_scraper.py --max-pages 10 --districts D15,D19
+```
 
 ### Output columns
 

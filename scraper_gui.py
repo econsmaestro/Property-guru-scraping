@@ -153,9 +153,12 @@ class ScraperApp:
 
         self.log_line("Starting scrape" + (f" for {', '.join(picked)}" if picked else " (all districts)") + "…")
         try:
+            import os
+            env = dict(os.environ, PYTHONIOENCODING="utf-8")
             self.proc = subprocess.Popen(
                 cmd, cwd=str(HERE), stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT, text=True, bufsize=1,
+                encoding="utf-8", errors="replace", env=env,
             )
         except OSError as exc:
             messagebox.showerror("Could not start", str(exc))

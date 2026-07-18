@@ -365,7 +365,7 @@ def wait_out_bot_check(page, headful: bool) -> bool:
         for _ in range(120):
             page.wait_for_timeout(5_000)
             if not looks_blocked(page):
-                print("  ✓ check passed, continuing")
+                print("  check passed, continuing")
                 return True
     return not looks_blocked(page)
 
@@ -407,7 +407,7 @@ def scrape(max_pages: int, output: str, headful: bool, delay: float,
                 if not cards:
                     # retry once with a fresh load — right after a solved bot
                     # check the first response is often not the real page yet
-                    print("  … no cards yet, reloading page")
+                    print("  ... no cards yet, reloading page")
                     try:
                         page.goto(url, wait_until="domcontentloaded", timeout=60_000)
                     except PlaywrightTimeoutError:
@@ -469,6 +469,14 @@ def scrape(max_pages: int, output: str, headful: bool, delay: float,
 
 
 def main() -> int:
+    # Windows consoles/pipes may default to a legacy encoding (cp1252)
+    # that can't represent all characters — never let printing crash us.
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
     parser = argparse.ArgumentParser(description="Scrape PropertyGuru condo listings")
     parser.add_argument("--max-pages", type=int, default=3,
                         help="number of search result pages to scrape (default: 3)")

@@ -177,6 +177,17 @@ def extract_cards(page) -> list:
     return []
 
 
+def wait_for_cards(page, timeout_s: float = 20.0) -> list:
+    """Poll for listing cards — pages keep rendering after domcontentloaded,
+    and after a solved bot check the real page arrives via a redirect."""
+    deadline = time.time() + timeout_s
+    while True:
+        cards = extract_cards(page)
+        if cards or time.time() > deadline:
+            return cards
+        page.wait_for_timeout(1_000)
+
+
 def scrape_card(card) -> Listing | None:
     listing = Listing()
 
@@ -392,10 +403,27 @@ def scrape(max_pages: int, output: str, headful: bool, delay: float,
                         fh.write(page.content())
                     print(f"  (debug: saved page HTML to {debug_file})")
 
-                cards = extract_cards(page)
+                cards = wait_for_cards(page)
                 if not cards:
+                    # retry once with a fresh load — right after a solved bot
+                    # check the first response is often not the real page yet
+                    print("  … no cards yet, reloading page")
+                    try:
+                        page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+                    except PlaywrightTimeoutError:
+                        pass
+                    if not wait_out_bot_check(page, headful):
+                        print("  ! blocked by bot protection on reload.")
+                        break
+                    cards = wait_for_cards(page)
+                if not cards:
+                    debug_file = f"debug_page{page_no}.html"
+                    with open(debug_file, "w", encoding="utf-8") as fh:
+                        fh.write(page.content())
                     print("  ! no listing cards found — page layout may have changed,")
                     print("    or this was the last page of results.")
+                    print(f"    Saved what the browser saw to {debug_file} —")
+                    print("    send that file to Claude to get the selectors fixed.")
                     break
 
                 json_details = page_json_details(page)

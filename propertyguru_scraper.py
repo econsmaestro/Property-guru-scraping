@@ -36,12 +36,25 @@ import re
 import sys
 import time
 from dataclasses import dataclass, asdict, fields
+from pathlib import Path
 
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
+from playwright.sync_api import (
+    sync_playwright,
+    Error as PlaywrightError,
+    TimeoutError as PlaywrightTimeoutError,
+)
+
+try:
+    from playwright._impl._errors import TargetClosedError
+except ImportError:  # not exposed in some playwright versions
+    TargetClosedError = PlaywrightError
 
 BASE_URL = "https://www.propertyguru.com.sg"
 # property_type=N is PropertyGuru's code for Condo/Apartment.
 SEARCH_PATH = "/property-for-sale/{page}?property_type=N&listing_type=sale"
+
+# Browser profile kept between runs so a solved bot check is remembered.
+PROFILE_DIR = Path(__file__).resolve().parent / ".pw-profile"
 
 USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -176,64 +189,102 @@ def looks_blocked(page) -> bool:
     return any(n in title or n in body for n in needles)
 
 
+def open_browser(p, headful: bool):
+    """Open a browser that looks as much like a normal one as possible.
+
+    Prefers the user's installed Google Chrome over Playwright's bundled
+    Chromium (real Chrome passes Cloudflare checks far more often), hides
+    the navigator.webdriver automation flag, and keeps a persistent
+    profile so a solved bot check is remembered for future runs.
+    """
+    common = dict(
+        headless=not headful,
+        args=["--disable-blink-features=AutomationControlled"],
+        viewport={"width": 1366, "height": 900},
+        locale="en-SG",
+    )
+    if not headful:
+        # headless Chromium advertises "HeadlessChrome" — mask it
+        common["user_agent"] = USER_AGENT
+    try:
+        context = p.chromium.launch_persistent_context(
+            str(PROFILE_DIR), channel="chrome", **common
+        )
+        print("Using installed Google Chrome")
+    except PlaywrightError:
+        context = p.chromium.launch_persistent_context(str(PROFILE_DIR), **common)
+        print("Google Chrome not found — using Playwright's Chromium")
+    return context
+
+
+def wait_out_bot_check(page, headful: bool) -> bool:
+    """Return True once the bot check is passed, False if still blocked."""
+    if not looks_blocked(page):
+        return True
+    if headful:
+        print("  ! bot check detected — click the checkbox in the browser window.")
+        print("    DO NOT close the window; the scrape continues automatically.")
+        print("    Waiting up to 10 minutes...")
+        for _ in range(120):
+            page.wait_for_timeout(5_000)
+            if not looks_blocked(page):
+                print("  ✓ check passed, continuing")
+                return True
+    return not looks_blocked(page)
+
+
 def scrape(max_pages: int, output: str, headful: bool, delay: float) -> int:
     listings: list[Listing] = []
 
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=not headful)
-        context = browser.new_context(
-            user_agent=USER_AGENT,
-            viewport={"width": 1366, "height": 900},
-            locale="en-SG",
-        )
-        page = context.new_page()
+        context = open_browser(p, headful)
+        page = context.pages[0] if context.pages else context.new_page()
 
-        for page_no in range(1, max_pages + 1):
-            url = BASE_URL + SEARCH_PATH.format(page=page_no)
-            print(f"[page {page_no}/{max_pages}] {url}")
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=60_000)
-                page.wait_for_timeout(3_000)  # let the listing cards render
-            except PlaywrightTimeoutError:
-                print("  ! page load timed out, skipping")
-                continue
+        try:
+            for page_no in range(1, max_pages + 1):
+                url = BASE_URL + SEARCH_PATH.format(page=page_no)
+                print(f"[page {page_no}/{max_pages}] {url}")
+                try:
+                    page.goto(url, wait_until="domcontentloaded", timeout=60_000)
+                    page.wait_for_timeout(3_000)  # let the listing cards render
+                except PlaywrightTimeoutError:
+                    print("  ! page load timed out, skipping")
+                    continue
 
-            if looks_blocked(page):
-                if headful:
-                    print("  ! bot check detected — solve it in the browser window;")
-                    print("    waiting up to 2 minutes...")
-                    for _ in range(24):
-                        page.wait_for_timeout(5_000)
-                        if not looks_blocked(page):
-                            break
-                if looks_blocked(page):
+                if not wait_out_bot_check(page, headful):
                     print("  ! blocked by bot protection. Re-run with --headful")
                     print("    from a residential connection and solve the check once.")
                     break
 
-            cards = extract_cards(page)
-            if not cards:
-                print("  ! no listing cards found — page layout may have changed,")
-                print("    or this was the last page of results.")
-                break
+                cards = extract_cards(page)
+                if not cards:
+                    print("  ! no listing cards found — page layout may have changed,")
+                    print("    or this was the last page of results.")
+                    break
 
-            found = 0
-            for card in cards:
-                try:
-                    listing = scrape_card(card)
-                except Exception as exc:  # one bad card shouldn't kill the run
-                    print(f"  ! failed to parse a card: {exc}")
-                    continue
-                if listing and listing.asking_price_sgd:
-                    listings.append(listing)
-                    found += 1
-            print(f"  -> {found} listings")
+                found = 0
+                for card in cards:
+                    try:
+                        listing = scrape_card(card)
+                    except Exception as exc:  # one bad card shouldn't kill the run
+                        print(f"  ! failed to parse a card: {exc}")
+                        continue
+                    if listing and listing.asking_price_sgd:
+                        listings.append(listing)
+                        found += 1
+                print(f"  -> {found} listings")
 
-            if page_no < max_pages:
-                pause = delay + random.uniform(0, delay / 2)
-                time.sleep(pause)
-
-        browser.close()
+                if page_no < max_pages:
+                    pause = delay + random.uniform(0, delay / 2)
+                    time.sleep(pause)
+        except TargetClosedError:
+            print("\n! The browser window was closed — stopping early.")
+            print("  (Leave the window open next time; it closes itself when done.)")
+        finally:
+            try:
+                context.close()
+            except PlaywrightError:
+                pass
 
     if not listings:
         print("No listings scraped.")

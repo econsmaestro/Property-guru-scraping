@@ -199,6 +199,8 @@ def open_browser(p, headful: bool):
     """
     common = dict(
         headless=not headful,
+        chromium_sandbox=True,  # Playwright disables it by default, which
+        # makes Chrome show a "--no-sandbox" warning banner
         args=["--disable-blink-features=AutomationControlled"],
         viewport={"width": 1366, "height": 900},
         locale="en-SG",

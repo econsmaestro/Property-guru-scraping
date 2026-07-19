@@ -1,0 +1,336 @@
+#!/usr/bin/env python3
+"""Local web app for the PropertyGuru condo scraper.
+
+Run it (or double-click "Run Web App.bat" on Windows) and a browser tab
+opens at http://127.0.0.1:5000 with everything on one page: pick your
+districts, click Start, watch live progress, and the listings appear in
+a sortable, filterable table when done.
+
+The scrape itself still opens a Chrome window on this computer — if it
+shows a "verify you are human" check, click it and leave it alone.
+"""
+
+from __future__ import annotations
+
+import csv
+import os
+import subprocess
+import sys
+import threading
+import webbrowser
+from pathlib import Path
+
+from flask import Flask, jsonify, render_template_string, request
+
+from districts import DISTRICTS
+
+HERE = Path(__file__).resolve().parent
+SCRAPER = HERE / "propertyguru_scraper.py"
+OUTPUT = "listings.csv"
+
+app = Flask(__name__)
+
+state_lock = threading.Lock()
+state = {
+    "running": False,
+    "log": [],          # list[str]
+    "exit_code": None,  # int | None
+    "proc": None,       # subprocess.Popen | None
+}
+
+
+# ----------------------------------------------------------------- backend
+
+
+def run_scrape(districts: list[str], max_pages: int) -> None:
+    cmd = [
+        sys.executable, "-u", str(SCRAPER),
+        "--headful",
+        "--max-pages", str(max_pages),
+        "--output", OUTPUT,
+    ]
+    if districts:
+        cmd += ["--districts", ",".join(districts)]
+
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    try:
+        proc = subprocess.Popen(
+            cmd, cwd=str(HERE), stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, bufsize=1,
+            encoding="utf-8", errors="replace", env=env,
+        )
+    except OSError as exc:
+        with state_lock:
+            state["log"].append(f"Could not start scraper: {exc}")
+            state["running"] = False
+            state["exit_code"] = 1
+        return
+
+    with state_lock:
+        state["proc"] = proc
+    for line in proc.stdout:
+        with state_lock:
+            state["log"].append(line.rstrip())
+    proc.wait()
+    with state_lock:
+        state["running"] = False
+        state["exit_code"] = proc.returncode
+        state["proc"] = None
+        state["log"].append(
+            "Scrape finished." if proc.returncode == 0
+            else "Scrape ended without results - see messages above."
+        )
+
+
+@app.post("/start")
+def start():
+    data = request.get_json(force=True) or {}
+    districts = [d for d in data.get("districts", []) if isinstance(d, str)]
+    try:
+        max_pages = max(1, min(100, int(data.get("max_pages", 5))))
+    except (TypeError, ValueError):
+        max_pages = 5
+
+    with state_lock:
+        if state["running"]:
+            return jsonify({"ok": False, "error": "A scrape is already running"}), 409
+        state["running"] = True
+        state["exit_code"] = None
+        state["log"] = ["Starting scrape" +
+                        (f" for {', '.join(districts)}" if districts else " (all districts)") +
+                        f", {max_pages} page(s)..."]
+    threading.Thread(target=run_scrape, args=(districts, max_pages), daemon=True).start()
+    return jsonify({"ok": True})
+
+
+@app.post("/stop")
+def stop():
+    with state_lock:
+        proc = state["proc"]
+    if proc:
+        proc.terminate()
+    return jsonify({"ok": True})
+
+
+@app.get("/status")
+def status():
+    with state_lock:
+        return jsonify({
+            "running": state["running"],
+            "log": state["log"][-200:],
+            "exit_code": state["exit_code"],
+            "have_results": (HERE / OUTPUT).exists(),
+        })
+
+
+@app.get("/results")
+def results():
+    path = HERE / OUTPUT
+    if not path.exists():
+        return jsonify({"rows": []})
+    with open(path, newline="", encoding="utf-8") as fh:
+        rows = list(csv.DictReader(fh))
+    return jsonify({"rows": rows})
+
+
+@app.post("/quit")
+def quit_app():
+    with state_lock:
+        proc = state["proc"]
+    if proc:
+        proc.terminate()
+    threading.Timer(0.3, lambda: os._exit(0)).start()
+    return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------- frontend
+
+PAGE = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PropertyGuru Condo Scraper</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: light; }
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+         margin: 0; background: #f4f5f7; color: #1c2733; }
+  header { background: #17323f; color: #fff; padding: 14px 24px;
+           display: flex; align-items: baseline; gap: 14px; }
+  header h1 { font-size: 20px; margin: 0; }
+  header span { opacity: .7; font-size: 13px; }
+  main { max-width: 1200px; margin: 20px auto; padding: 0 16px; }
+  .panel { background: #fff; border-radius: 10px; padding: 18px;
+           box-shadow: 0 1px 3px rgba(0,0,0,.08); margin-bottom: 18px; }
+  .districts { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+               gap: 2px 14px; margin: 10px 0; }
+  .districts label { font-size: 13px; padding: 3px 2px; cursor: pointer; }
+  .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 10px; }
+  button { border: 0; border-radius: 7px; padding: 9px 18px; font-size: 14px;
+           cursor: pointer; background: #dde3e8; }
+  button.primary { background: #0b7a4b; color: #fff; }
+  button.danger { background: #b3352f; color: #fff; }
+  button:disabled { opacity: .45; cursor: default; }
+  input[type=number] { width: 70px; padding: 7px; border: 1px solid #c6ccd2; border-radius: 6px; }
+  input[type=search] { padding: 8px 10px; border: 1px solid #c6ccd2; border-radius: 6px; width: 260px; }
+  #log { background: #10161c; color: #cfe3d8; font: 12px/1.5 ui-monospace, monospace;
+         border-radius: 8px; padding: 12px; height: 150px; overflow-y: auto;
+         white-space: pre-wrap; display: none; }
+  .hint { color: #5a6a76; font-size: 13px; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 9px; border-bottom: 1px solid #e6e9ec; }
+  th { cursor: pointer; user-select: none; background: #f0f2f4; position: sticky; top: 0; }
+  th .arrow { opacity: .5; font-size: 11px; }
+  tr:hover td { background: #f6f9fb; }
+  td a { color: #0b6aa4; }
+  .tablewrap { overflow-x: auto; max-height: 65vh; overflow-y: auto; }
+  #count { font-weight: 600; }
+  footer { text-align: right; padding: 6px 24px 20px; }
+  footer button { font-size: 12px; padding: 6px 12px; }
+</style>
+</head>
+<body>
+<header><h1>PropertyGuru Condo Scraper</h1><span>family house-hunting edition</span></header>
+<main>
+  <div class="panel">
+    <strong>1 &mdash; Choose districts</strong>
+    <span class="hint">(leave all unticked to search the whole of Singapore)</span>
+    <div class="districts" id="districts"></div>
+    <div class="controls">
+      <strong>2 &mdash;</strong>
+      <label>Pages <input type="number" id="pages" value="5" min="1" max="100"></label>
+      <span class="hint">(~20 listings per page)</span>
+      <button class="primary" id="startBtn" onclick="startScrape()">Start scraping</button>
+      <button class="danger" id="stopBtn" onclick="stopScrape()" disabled>Stop</button>
+      <span class="hint" id="runhint"></span>
+    </div>
+    <p class="hint">A Chrome window opens on this computer while scraping. If it asks you to
+       verify you are human, click the checkbox and leave the window alone.</p>
+    <div id="log"></div>
+  </div>
+
+  <div class="panel">
+    <div class="controls" style="margin:0 0 10px">
+      <strong>3 &mdash; Results</strong>
+      <span class="hint"><span id="count">0</span> listings &mdash; click a column heading to sort</span>
+      <input type="search" id="filter" placeholder="Filter: e.g. Freehold, D15, 3 bed..."
+             oninput="renderTable()">
+    </div>
+    <div class="tablewrap"><table id="table"></table></div>
+  </div>
+</main>
+<footer><button onclick="quitApp()">Shut down app</button></footer>
+
+<script>
+const DISTRICTS = {{ districts | tojson }};
+const COLUMNS = [
+  ["title", "Project"], ["asking_price_sgd", "Price (S$)"], ["bedrooms", "Beds"],
+  ["bathrooms", "Baths"], ["area_sqft", "Sqft"], ["price_psf", "S$/sqft"],
+  ["tenure", "Tenure"], ["mrt_proximity", "MRT"], ["location", "Location"],
+];
+const NUMERIC = new Set(["asking_price_sgd", "bedrooms", "bathrooms", "area_sqft", "price_psf"]);
+let rows = [], sortKey = "asking_price_sgd", sortAsc = true, polling = false;
+
+const $ = id => document.getElementById(id);
+
+DISTRICTS.forEach(([code, name]) => {
+  $("districts").insertAdjacentHTML("beforeend",
+    `<label><input type="checkbox" value="${code}"> ${code} &nbsp;${name}</label>`);
+});
+
+async function startScrape() {
+  const picked = [...document.querySelectorAll("#districts input:checked")].map(c => c.value);
+  const res = await fetch("/start", {method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({districts: picked, max_pages: +$("pages").value || 5})});
+  if (!res.ok) { alert((await res.json()).error || "Could not start"); return; }
+  setRunning(true);
+  if (!polling) poll();
+}
+
+async function stopScrape() { await fetch("/stop", {method: "POST"}); }
+
+async function quitApp() {
+  if (!confirm("Shut down the scraper app? (You can restart it any time.)")) return;
+  await fetch("/quit", {method: "POST"});
+  document.body.innerHTML = "<main><div class='panel'>App shut down. You can close this tab.</div></main>";
+}
+
+function setRunning(on) {
+  $("startBtn").disabled = on;
+  $("stopBtn").disabled = !on;
+  $("runhint").textContent = on ? "Scraping…" : "";
+  $("log").style.display = "block";
+}
+
+async function poll() {
+  polling = true;
+  try {
+    const s = await (await fetch("/status")).json();
+    $("log").textContent = s.log.join("\\n");
+    $("log").scrollTop = $("log").scrollHeight;
+    if (s.running) { setTimeout(poll, 1500); return; }
+    polling = false;
+    setRunning(false);
+    if (s.have_results) loadResults();
+  } catch (e) { polling = false; setRunning(false); }
+}
+
+async function loadResults() {
+  rows = (await (await fetch("/results")).json()).rows;
+  renderTable();
+}
+
+const num = v => parseFloat(String(v).replace(/[^0-9.]/g, "")) || 0;
+
+function renderTable() {
+  const q = $("filter").value.toLowerCase();
+  let shown = rows.filter(r => !q || Object.values(r).join(" ").toLowerCase().includes(q));
+  shown.sort((a, b) => {
+    const [x, y] = [a[sortKey] || "", b[sortKey] || ""];
+    const cmp = NUMERIC.has(sortKey) ? num(x) - num(y) : String(x).localeCompare(String(y));
+    return sortAsc ? cmp : -cmp;
+  });
+  $("count").textContent = shown.length;
+  const head = "<tr>" + COLUMNS.map(([k, label]) =>
+    `<th onclick="sortBy('${k}')">${label} <span class="arrow">${k === sortKey ? (sortAsc ? "▲" : "▼") : ""}</span></th>`
+  ).join("") + "</tr>";
+  const body = shown.map(r => "<tr>" + COLUMNS.map(([k]) => {
+    let v = r[k] || "";
+    if (k === "title" && r.url) v = `<a href="${r.url}" target="_blank" rel="noopener">${v || "view listing"}</a>`;
+    return `<td>${v}</td>`;
+  }).join("") + "</tr>").join("");
+  $("table").innerHTML = head + body;
+}
+
+function sortBy(k) {
+  if (sortKey === k) sortAsc = !sortAsc; else { sortKey = k; sortAsc = true; }
+  renderTable();
+}
+
+// on load: show any existing results, and resume polling if a scrape is running
+loadResults();
+fetch("/status").then(r => r.json()).then(s => {
+  if (s.running) { setRunning(true); poll(); }
+});
+</script>
+</body>
+</html>"""
+
+
+@app.get("/")
+def index():
+    return render_template_string(PAGE, districts=DISTRICTS)
+
+
+def main():
+    port = int(os.environ.get("PORT", "5000"))
+    threading.Timer(1.0, lambda: webbrowser.open(f"http://127.0.0.1:{port}")).start()
+    print(f"PropertyGuru scraper web app running at http://127.0.0.1:{port}")
+    print("Keep this window open while using it (or use the app's Shut down button).")
+    app.run(host="127.0.0.1", port=port, threaded=True)
+
+
+if __name__ == "__main__":
+    main()

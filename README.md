@@ -3,9 +3,25 @@ my family is moving house and is looking for help to scrape for listing.
 we want you to scrape property guru for condos.
 the information to scrape for should be 1. tenure 2. square foot area 3. asking price 4. number of bedrooms 5. number of bathrooms 6. location and 7. proximity to MRT
 
-## Easiest way: the point-and-click app (no coding)
+## Easiest way: the web app (no coding)
 
-On Windows, just **double-click `Run Scraper.bat`** in this folder.
+On Windows, just **double-click `Run Web App.bat`** in this folder. A browser
+tab opens at `http://127.0.0.1:5000` with everything on one page:
+
+- tick the districts you want (or none for all of Singapore), set pages,
+  click **Start scraping**
+- progress streams live on the page while the scrape runs in the background
+- when it finishes, the listings appear right there in a table you can
+  **sort by any column** (price, sqft, beds…) and **filter** by typing
+  (e.g. "Freehold"), with links to each listing
+- first run sets everything up automatically (needs Python from
+  [python.org](https://www.python.org/downloads/) with "Add Python to PATH" ticked)
+
+On Mac/Linux, after the setup below: `python webapp.py`
+
+## Alternative: the desktop app
+
+On Windows, **double-click `Run Scraper.bat`** in this folder.
 
 - The first time, it sets everything up by itself (takes a few minutes —
   it only needs Python installed, from [python.org](https://www.python.org/downloads/),

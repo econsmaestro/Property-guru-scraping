@@ -5,3 +5,4 @@ venv/
 listings*.csv
 .pw-profile/
 debug_page*.html
+.site_url

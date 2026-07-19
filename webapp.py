@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import csv
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -153,6 +154,42 @@ def export():
     return jsonify({"ok": True, "count": count, "path": "docs/index.html"})
 
 
+SITE_URL_FILE = HERE / ".site_url"
+
+
+@app.get("/siteurl")
+def get_siteurl():
+    url = SITE_URL_FILE.read_text(encoding="utf-8").strip() if SITE_URL_FILE.exists() else ""
+    return jsonify({"url": url})
+
+
+@app.post("/siteurl")
+def set_siteurl():
+    url = ((request.get_json(force=True) or {}).get("url") or "").strip()
+    if url and not re.match(r"^https?://", url):
+        return jsonify({"ok": False, "error": "Link must start with http:// or https://"}), 400
+    SITE_URL_FILE.write_text(url, encoding="utf-8")
+    return jsonify({"ok": True})
+
+
+@app.post("/publish")
+def publish():
+    """Commit and push docs/index.html so the hosted site updates."""
+    steps = [
+        ["git", "add", "docs/index.html"],
+        ["git", "commit", "-m", "Update shared listings page"],
+        ["git", "push"],
+    ]
+    for cmd in steps:
+        r = subprocess.run(cmd, cwd=str(HERE), capture_output=True, text=True)
+        if r.returncode != 0:
+            msg = (r.stdout + r.stderr).strip()
+            if cmd[1] == "commit" and "nothing to commit" in msg:
+                continue  # page unchanged since last publish — push anyway
+            return jsonify({"ok": False, "error": msg[-600:]}), 500
+    return jsonify({"ok": True})
+
+
 @app.post("/quit")
 def quit_app():
     with state_lock:
@@ -213,6 +250,15 @@ PAGE = """<!doctype html>
   #count { font-weight: 600; }
   footer { text-align: right; padding: 6px 24px 20px; }
   footer button { font-size: 12px; padding: 6px 12px; }
+  .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,.45);
+              display: none; align-items: center; justify-content: center; z-index: 50; }
+  .modal { background: #fff; border-radius: 12px; padding: 22px;
+           width: min(500px, 92vw); box-shadow: 0 12px 40px rgba(0,0,0,.25); }
+  .modal h3 { margin: 0 0 8px; }
+  .modal input[type=url] { width: 100%; padding: 8px 10px;
+           border: 1px solid #c6ccd2; border-radius: 6px; }
+  .sharebtns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 8px; }
+  .steplabel { font-weight: 600; font-size: 13px; margin: 14px 0 5px; }
 </style>
 </head>
 <body>
@@ -278,6 +324,29 @@ PAGE = """<!doctype html>
   </div>
 </main>
 <footer><button onclick="quitApp()">Shut down app</button></footer>
+
+<div class="modal-bg" id="shareModal">
+  <div class="modal">
+    <h3>Share your listings page</h3>
+    <p class="hint" id="exportInfo"></p>
+    <div class="steplabel">1 &mdash; Publish the update to your live site</div>
+    <button class="primary" onclick="publishSite()">Publish (git push)</button>
+    <span class="hint" id="pubstatus"></span>
+    <div class="steplabel">2 &mdash; Your site link</div>
+    <input type="url" id="siteUrl" onchange="saveSiteUrl()"
+           placeholder="https://your-site.vercel.app  (paste once after your first Vercel deploy)">
+    <div class="steplabel">3 &mdash; Share it on</div>
+    <div class="sharebtns">
+      <button onclick="shareTo('whatsapp')">WhatsApp</button>
+      <button onclick="shareTo('telegram')">Telegram</button>
+      <button onclick="shareTo('facebook')">Facebook</button>
+      <button onclick="shareTo('x')">X / Twitter</button>
+      <button onclick="shareTo('email')">Email</button>
+      <button onclick="copyLink()">Copy link</button>
+    </div>
+    <div style="text-align:right; margin-top:16px"><button onclick="closeShare()">Close</button></div>
+  </div>
+</div>
 
 <script>
 const DISTRICTS = {{ districts | tojson }};
@@ -408,10 +477,57 @@ async function exportPage() {
   const res = await fetch("/export", {method: "POST",
     headers: {"Content-Type": "application/json"}, body: JSON.stringify({file: f})});
   const data = await res.json();
-  alert(res.ok
-    ? `Exported ${data.count} listings to ${data.path}.\\nCommit & push it and your hosted site updates.`
-    : (data.error || "Export failed"));
+  if (!res.ok) { alert(data.error || "Export failed"); return; }
+  $("exportInfo").textContent =
+    `${data.count} listings from ${f} are ready in ${data.path}.`;
+  $("siteUrl").value = (await (await fetch("/siteurl")).json()).url;
+  $("pubstatus").textContent = "";
+  $("shareModal").style.display = "flex";
 }
+
+async function saveSiteUrl() {
+  const res = await fetch("/siteurl", {method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({url: $("siteUrl").value.trim()})});
+  if (!res.ok) alert((await res.json()).error);
+}
+
+async function publishSite() {
+  $("pubstatus").textContent = " publishing…";
+  const res = await fetch("/publish", {method: "POST"});
+  const d = await res.json();
+  $("pubstatus").textContent = res.ok
+    ? " Done — the live site updates in about a minute."
+    : " Failed: " + (d.error || "unknown error");
+}
+
+function sharedLink() {
+  const u = $("siteUrl").value.trim();
+  if (!u) { alert("Paste your site link first (you get it from Vercel after the first deploy)."); return null; }
+  return u;
+}
+
+function shareTo(app) {
+  const u = sharedLink(); if (!u) return;
+  const enc = encodeURIComponent;
+  const text = "Check out our condo shortlist: ";
+  const links = {
+    whatsapp: `https://wa.me/?text=${enc(text + u)}`,
+    telegram: `https://t.me/share/url?url=${enc(u)}&text=${enc("Our condo shortlist")}`,
+    facebook: `https://www.facebook.com/sharer/sharer.php?u=${enc(u)}`,
+    x: `https://twitter.com/intent/tweet?text=${enc(text)}&url=${enc(u)}`,
+    email: `mailto:?subject=${enc("Our condo shortlist")}&body=${enc(text + u)}`,
+  };
+  window.open(links[app], "_blank");
+}
+
+async function copyLink() {
+  const u = sharedLink(); if (!u) return;
+  try { await navigator.clipboard.writeText(u); alert("Link copied!"); }
+  catch (e) { prompt("Copy the link:", u); }
+}
+
+function closeShare() { $("shareModal").style.display = "none"; }
 
 // on load: list saved scrapes (newest first), show one, resume polling if running
 loadFiles().then(loadResults);

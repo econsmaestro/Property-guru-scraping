@@ -185,6 +185,10 @@ PAGE = """<!doctype html>
   input[type=number] { width: 70px; padding: 7px; border: 1px solid #c6ccd2; border-radius: 6px; }
   input[type=search] { padding: 8px 10px; border: 1px solid #c6ccd2; border-radius: 6px; width: 260px; }
   select { padding: 7px 9px; border: 1px solid #c6ccd2; border-radius: 6px; background: #fff; }
+  .filters { background: #f0f4f7; border-radius: 8px; padding: 10px 12px; }
+  .filters label { font-size: 13px; display: flex; align-items: center; gap: 5px; }
+  .filters input[type=number] { width: 95px; padding: 6px 8px;
+    border: 1px solid #c6ccd2; border-radius: 6px; }
   #log { background: #10161c; color: #cfe3d8; font: 12px/1.5 ui-monospace, monospace;
          border-radius: 8px; padding: 12px; height: 150px; overflow-y: auto;
          white-space: pre-wrap; display: none; }
@@ -226,8 +230,38 @@ PAGE = """<!doctype html>
       <strong>3 &mdash; Results</strong>
       <select id="csvfile" onchange="loadResults()" title="Which saved scrape to show"></select>
       <span class="hint"><span id="count">0</span> listings &mdash; click a column heading to sort</span>
-      <input type="search" id="filter" placeholder="Filter: e.g. Freehold, D15, 3 bed..."
+      <input type="search" id="filter" placeholder="Search: e.g. Katong, Meyer..."
              oninput="renderTable()">
+    </div>
+    <div class="controls filters" style="margin:0 0 10px">
+      <label>Price S$
+        <input type="number" id="fPriceMin" placeholder="min" min="0" oninput="renderTable()">
+        &ndash;
+        <input type="number" id="fPriceMax" placeholder="max" min="0" oninput="renderTable()">
+      </label>
+      <label>Beds
+        <select id="fBeds" onchange="renderTable()">
+          <option value="">Any</option><option value="1">1+</option>
+          <option value="2">2+</option><option value="3">3+</option>
+          <option value="4">4+</option><option value="5">5+</option>
+        </select>
+      </label>
+      <label>Baths
+        <select id="fBaths" onchange="renderTable()">
+          <option value="">Any</option><option value="1">1+</option>
+          <option value="2">2+</option><option value="3">3+</option>
+          <option value="4">4+</option><option value="5">5+</option>
+        </select>
+      </label>
+      <label>Sqft
+        <input type="number" id="fSqftMin" placeholder="min" min="0" oninput="renderTable()">
+        &ndash;
+        <input type="number" id="fSqftMax" placeholder="max" min="0" oninput="renderTable()">
+      </label>
+      <label>Tenure
+        <select id="fTenure" onchange="renderTable()"><option value="">Any</option></select>
+      </label>
+      <button onclick="clearFilters()">Clear filters</button>
     </div>
     <div class="tablewrap"><table id="table"></table></div>
   </div>
@@ -302,14 +336,39 @@ async function loadResults() {
   const f = $("csvfile").value;
   if (!f) { rows = []; renderTable(); return; }
   rows = (await (await fetch("/results?file=" + encodeURIComponent(f))).json()).rows;
+  // rebuild the tenure dropdown from the tenures present in this data
+  const sel = $("fTenure"), keep = sel.value;
+  const tenures = [...new Set(rows.map(r => r.tenure).filter(Boolean))].sort();
+  sel.innerHTML = '<option value="">Any</option>' +
+    tenures.map(t => `<option>${t}</option>`).join("");
+  if ([...sel.options].some(o => o.value === keep)) sel.value = keep;
   renderTable();
 }
 
 const num = v => parseFloat(String(v).replace(/[^0-9.]/g, "")) || 0;
+const bedCount = r => /studio/i.test(r.bedrooms || "") ? 0 : num(r.bedrooms);
+
+function clearFilters() {
+  for (const id of ["filter", "fPriceMin", "fPriceMax", "fSqftMin", "fSqftMax"]) $(id).value = "";
+  for (const id of ["fBeds", "fBaths", "fTenure"]) $(id).value = "";
+  renderTable();
+}
 
 function renderTable() {
   const q = $("filter").value.toLowerCase();
-  let shown = rows.filter(r => !q || Object.values(r).join(" ").toLowerCase().includes(q));
+  const pMin = +$("fPriceMin").value || 0, pMax = +$("fPriceMax").value || Infinity;
+  const sMin = +$("fSqftMin").value || 0, sMax = +$("fSqftMax").value || Infinity;
+  const minBeds = +$("fBeds").value || 0, minBaths = +$("fBaths").value || 0;
+  const tenure = $("fTenure").value;
+  let shown = rows.filter(r => {
+    const price = num(r.asking_price_sgd), sqft = num(r.area_sqft);
+    return (!q || Object.values(r).join(" ").toLowerCase().includes(q))
+      && price >= pMin && price <= pMax
+      && sqft >= sMin && sqft <= sMax
+      && bedCount(r) >= minBeds
+      && num(r.bathrooms) >= minBaths
+      && (!tenure || (r.tenure || "") === tenure);
+  });
   shown.sort((a, b) => {
     const [x, y] = [a[sortKey] || "", b[sortKey] || ""];
     const cmp = NUMERIC.has(sortKey) ? num(x) - num(y) : String(x).localeCompare(String(y));

@@ -123,9 +123,19 @@ def status():
         })
 
 
+@app.get("/files")
+def files():
+    csvs = sorted(HERE.glob("*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
+    return jsonify({"files": [p.name for p in csvs]})
+
+
 @app.get("/results")
 def results():
-    path = HERE / OUTPUT
+    name = request.args.get("file", OUTPUT)
+    # only allow plain .csv filenames that live in the project folder
+    if Path(name).name != name or not name.endswith(".csv"):
+        return jsonify({"rows": []}), 400
+    path = HERE / name
     if not path.exists():
         return jsonify({"rows": []})
     with open(path, newline="", encoding="utf-8") as fh:
@@ -174,6 +184,7 @@ PAGE = """<!doctype html>
   button:disabled { opacity: .45; cursor: default; }
   input[type=number] { width: 70px; padding: 7px; border: 1px solid #c6ccd2; border-radius: 6px; }
   input[type=search] { padding: 8px 10px; border: 1px solid #c6ccd2; border-radius: 6px; width: 260px; }
+  select { padding: 7px 9px; border: 1px solid #c6ccd2; border-radius: 6px; background: #fff; }
   #log { background: #10161c; color: #cfe3d8; font: 12px/1.5 ui-monospace, monospace;
          border-radius: 8px; padding: 12px; height: 150px; overflow-y: auto;
          white-space: pre-wrap; display: none; }
@@ -213,6 +224,7 @@ PAGE = """<!doctype html>
   <div class="panel">
     <div class="controls" style="margin:0 0 10px">
       <strong>3 &mdash; Results</strong>
+      <select id="csvfile" onchange="loadResults()" title="Which saved scrape to show"></select>
       <span class="hint"><span id="count">0</span> listings &mdash; click a column heading to sort</span>
       <input type="search" id="filter" placeholder="Filter: e.g. Freehold, D15, 3 bed..."
              oninput="renderTable()">
@@ -273,12 +285,23 @@ async function poll() {
     if (s.running) { setTimeout(poll, 1500); return; }
     polling = false;
     setRunning(false);
-    if (s.have_results) loadResults();
+    if (s.have_results) loadFiles("listings.csv").then(loadResults);
   } catch (e) { polling = false; setRunning(false); }
 }
 
+async function loadFiles(prefer) {
+  const files = (await (await fetch("/files")).json()).files;
+  const sel = $("csvfile");
+  const keep = prefer || sel.value;
+  sel.innerHTML = files.map(f => `<option value="${f}">${f}</option>`).join("");
+  if (keep && files.includes(keep)) sel.value = keep;
+  return files;
+}
+
 async function loadResults() {
-  rows = (await (await fetch("/results")).json()).rows;
+  const f = $("csvfile").value;
+  if (!f) { rows = []; renderTable(); return; }
+  rows = (await (await fetch("/results?file=" + encodeURIComponent(f))).json()).rows;
   renderTable();
 }
 
@@ -309,8 +332,8 @@ function sortBy(k) {
   renderTable();
 }
 
-// on load: show any existing results, and resume polling if a scrape is running
-loadResults();
+// on load: list saved scrapes (newest first), show one, resume polling if running
+loadFiles().then(loadResults);
 fetch("/status").then(r => r.json()).then(s => {
   if (s.running) { setRunning(true); poll(); }
 });

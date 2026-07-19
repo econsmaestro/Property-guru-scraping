@@ -23,6 +23,7 @@ from pathlib import Path
 from flask import Flask, jsonify, render_template_string, request
 
 from districts import DISTRICTS
+from export_static import export_page
 
 HERE = Path(__file__).resolve().parent
 SCRAPER = HERE / "propertyguru_scraper.py"
@@ -141,6 +142,15 @@ def results():
     with open(path, newline="", encoding="utf-8") as fh:
         rows = list(csv.DictReader(fh))
     return jsonify({"rows": rows})
+
+
+@app.post("/export")
+def export():
+    name = (request.get_json(force=True) or {}).get("file", OUTPUT)
+    if Path(name).name != name or not name.endswith(".csv") or not (HERE / name).exists():
+        return jsonify({"ok": False, "error": "bad file"}), 400
+    count = export_page(HERE / name, HERE / "docs" / "index.html")
+    return jsonify({"ok": True, "count": count, "path": "docs/index.html"})
 
 
 @app.post("/quit")
@@ -262,6 +272,7 @@ PAGE = """<!doctype html>
         <select id="fTenure" onchange="renderTable()"><option value="">Any</option></select>
       </label>
       <button onclick="clearFilters()">Clear filters</button>
+      <button onclick="exportPage()" title="Save this scrape as docs/index.html for hosting">Export shareable page</button>
     </div>
     <div class="tablewrap"><table id="table"></table></div>
   </div>
@@ -389,6 +400,17 @@ function renderTable() {
 function sortBy(k) {
   if (sortKey === k) sortAsc = !sortAsc; else { sortKey = k; sortAsc = true; }
   renderTable();
+}
+
+async function exportPage() {
+  const f = $("csvfile").value;
+  if (!f) { alert("No results file selected."); return; }
+  const res = await fetch("/export", {method: "POST",
+    headers: {"Content-Type": "application/json"}, body: JSON.stringify({file: f})});
+  const data = await res.json();
+  alert(res.ok
+    ? `Exported ${data.count} listings to ${data.path}.\\nCommit & push it and your hosted site updates.`
+    : (data.error || "Export failed"));
 }
 
 // on load: list saved scrapes (newest first), show one, resume polling if running

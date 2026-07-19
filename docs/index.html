@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Condo Listings</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+         margin: 0; background: #f4f5f7; color: #1c2733; }
+  header { background: #17323f; color: #fff; padding: 14px 20px; }
+  header h1 { font-size: 19px; margin: 0; }
+  header p { margin: 4px 0 0; opacity: .75; font-size: 13px; }
+  main { max-width: 1250px; margin: 16px auto; padding: 0 12px; }
+  .panel { background: #fff; border-radius: 10px; padding: 14px;
+           box-shadow: 0 1px 3px rgba(0,0,0,.08); margin-bottom: 14px; }
+  .filters { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center;
+             background: #f0f4f7; border-radius: 8px; padding: 10px 12px; }
+  .filters label { font-size: 13px; display: flex; align-items: center; gap: 5px; }
+  input[type=number] { width: 90px; padding: 6px 8px; border: 1px solid #c6ccd2; border-radius: 6px; }
+  input[type=search] { padding: 7px 10px; border: 1px solid #c6ccd2; border-radius: 6px; width: 200px; }
+  select { padding: 6px 8px; border: 1px solid #c6ccd2; border-radius: 6px; background: #fff; }
+  button { border: 0; border-radius: 6px; padding: 7px 14px; font-size: 13px;
+           cursor: pointer; background: #dde3e8; }
+  .meta { font-size: 13px; color: #5a6a76; margin: 10px 2px; }
+  .meta b { color: #1c2733; }
+  .tablewrap { overflow-x: auto; max-height: 72vh; overflow-y: auto;
+               -webkit-overflow-scrolling: touch; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; min-width: 900px; }
+  th, td { text-align: left; padding: 7px 9px; border-bottom: 1px solid #e6e9ec; }
+  th { cursor: pointer; user-select: none; background: #f0f2f4; position: sticky; top: 0; }
+  th .arrow { opacity: .5; font-size: 11px; }
+  tr:hover td { background: #f6f9fb; }
+  td a { color: #0b6aa4; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Condo Listings</h1>
+  <p>Scraped from PropertyGuru on 2026-07-19 &middot; family house-hunting</p>
+</header>
+<main>
+  <div class="panel">
+    <div class="filters">
+      <label>Price S$
+        <input type="number" id="fPriceMin" placeholder="min" min="0" oninput="renderTable()">
+        &ndash;
+        <input type="number" id="fPriceMax" placeholder="max" min="0" oninput="renderTable()">
+      </label>
+      <label>Beds
+        <select id="fBeds" onchange="renderTable()">
+          <option value="">Any</option><option value="1">1+</option>
+          <option value="2">2+</option><option value="3">3+</option>
+          <option value="4">4+</option><option value="5">5+</option>
+        </select>
+      </label>
+      <label>Baths
+        <select id="fBaths" onchange="renderTable()">
+          <option value="">Any</option><option value="1">1+</option>
+          <option value="2">2+</option><option value="3">3+</option>
+          <option value="4">4+</option><option value="5">5+</option>
+        </select>
+      </label>
+      <label>Sqft
+        <input type="number" id="fSqftMin" placeholder="min" min="0" oninput="renderTable()">
+        &ndash;
+        <input type="number" id="fSqftMax" placeholder="max" min="0" oninput="renderTable()">
+      </label>
+      <label>Tenure
+        <select id="fTenure" onchange="renderTable()"><option value="">Any</option></select>
+      </label>
+      <label>Search
+        <input type="search" id="filter" placeholder="e.g. Katong" oninput="renderTable()">
+      </label>
+      <button onclick="clearFilters()">Clear</button>
+    </div>
+    <p class="meta"><b id="count">0</b> listings shown &mdash; tap a column heading to sort</p>
+    <div class="tablewrap"><table id="table"></table></div>
+  </div>
+</main>
+
+<script>
+const rows = [];
+const COLUMNS = [
+  ["title", "Project"], ["asking_price_sgd", "Price (S$)"], ["bedrooms", "Beds"],
+  ["bathrooms", "Baths"], ["area_sqft", "Sqft"], ["price_psf", "S$/sqft"],
+  ["tenure", "Tenure"], ["mrt_proximity", "MRT"], ["location", "Location"],
+];
+const NUMERIC = new Set(["asking_price_sgd", "bedrooms", "bathrooms", "area_sqft", "price_psf"]);
+let sortKey = "asking_price_sgd", sortAsc = true;
+
+const $ = id => document.getElementById(id);
+const num = v => parseFloat(String(v).replace(/[^0-9.]/g, "")) || 0;
+const bedCount = r => /studio/i.test(r.bedrooms || "") ? 0 : num(r.bedrooms);
+
+// tenure options from the data
+{
+  const tenures = [...new Set(rows.map(r => r.tenure).filter(Boolean))].sort();
+  $("fTenure").innerHTML = '<option value="">Any</option>' +
+    tenures.map(t => `<option>${t}</option>`).join("");
+}
+
+function clearFilters() {
+  for (const id of ["filter", "fPriceMin", "fPriceMax", "fSqftMin", "fSqftMax"]) $(id).value = "";
+  for (const id of ["fBeds", "fBaths", "fTenure"]) $(id).value = "";
+  renderTable();
+}
+
+function renderTable() {
+  const q = $("filter").value.toLowerCase();
+  const pMin = +$("fPriceMin").value || 0, pMax = +$("fPriceMax").value || Infinity;
+  const sMin = +$("fSqftMin").value || 0, sMax = +$("fSqftMax").value || Infinity;
+  const minBeds = +$("fBeds").value || 0, minBaths = +$("fBaths").value || 0;
+  const tenure = $("fTenure").value;
+  let shown = rows.filter(r => {
+    const price = num(r.asking_price_sgd), sqft = num(r.area_sqft);
+    return (!q || Object.values(r).join(" ").toLowerCase().includes(q))
+      && price >= pMin && price <= pMax
+      && sqft >= sMin && sqft <= sMax
+      && bedCount(r) >= minBeds
+      && num(r.bathrooms) >= minBaths
+      && (!tenure || (r.tenure || "") === tenure);
+  });
+  shown.sort((a, b) => {
+    const [x, y] = [a[sortKey] || "", b[sortKey] || ""];
+    const cmp = NUMERIC.has(sortKey) ? num(x) - num(y) : String(x).localeCompare(String(y));
+    return sortAsc ? cmp : -cmp;
+  });
+  $("count").textContent = shown.length;
+  const head = "<tr>" + COLUMNS.map(([k, label]) =>
+    `<th onclick="sortBy('${k}')">${label} <span class="arrow">${k === sortKey ? (sortAsc ? "\u25B2" : "\u25BC") : ""}</span></th>`
+  ).join("") + "</tr>";
+  const body = shown.map(r => "<tr>" + COLUMNS.map(([k]) => {
+    let v = r[k] || "";
+    if (k === "title" && r.url) v = `<a href="${r.url}" target="_blank" rel="noopener">${v || "view listing"}</a>`;
+    return `<td>${v}</td>`;
+  }).join("") + "</tr>").join("");
+  $("table").innerHTML = head + body;
+}
+
+function sortBy(k) {
+  if (sortKey === k) sortAsc = !sortAsc; else { sortKey = k; sortAsc = true; }
+  renderTable();
+}
+
+renderTable();
+</script>
+</body>
+</html>

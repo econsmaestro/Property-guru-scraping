@@ -34,6 +34,25 @@ On Windows, **double-click `Run Scraper.bat`** in this folder.
 
 On Mac/Linux, after the setup below, run: `python scraper_gui.py`
 
+## Sharing results with the family (Vercel)
+
+The scraping must run on a home computer (PropertyGuru blocks cloud
+servers), but the *results* can be hosted online for everyone to browse
+on their phones — filters, sorting, and listing links included:
+
+1. After a scrape, click **Export shareable page** in the web app (or run
+   `python export_static.py fresh_test.csv`). This writes `docs/index.html`
+   with the data baked in.
+2. Commit and push it: `git add docs && git commit -m "update listings" && git push`
+3. On [vercel.com](https://vercel.com): **Add New → Project**, import this
+   GitHub repo, and deploy — no settings needed (`vercel.json` already
+   points it at the `docs` folder). You get a URL like
+   `property-guru-scraping.vercel.app` to send to the family.
+4. Every future export + push updates the site automatically.
+
+Note: the hosted page is public to anyone with the URL. It only contains
+the listings table — never put anything private in it.
+
 ## How to run the scraper (command line)
 
 The scraper (`propertyguru_scraper.py`) drives a real Chromium browser with

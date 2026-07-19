@@ -140,6 +140,7 @@ def parse_card_text(text: str, listing: Listing) -> None:
 # ---------------------------------------------------------------- scraping
 
 CARD_SELECTORS = [
+    "div.listing-card-v2",       # current site layout (2025+)
     "div[data-listing-id]",
     "div.listing-card",
     "div[class*='listing-card']",
@@ -188,20 +189,46 @@ def wait_for_cards(page, timeout_s: float = 20.0) -> list:
         page.wait_for_timeout(1_000)
 
 
+def _da_text(card, suffix: str) -> str:
+    """Text of the element PropertyGuru tags with da-id="listing-card-v2-…"."""
+    el = card.query_selector(f'[da-id="listing-card-v2-{suffix}"]')
+    return (el.inner_text() or "").strip() if el else ""
+
+
 def scrape_card(card) -> Listing | None:
     listing = Listing()
 
     text = card.inner_text()
     if not text or "S$" not in text:
         return None
-    parse_card_text(text, listing)
+    parse_card_text(text, listing)  # regex baseline for any layout
 
-    listing.title = _query_text(card, TITLE_SELECTORS)
+    # The current site tags every field with a da-id marker — when those
+    # are present they are authoritative and override the regex guesses.
+    if title := _da_text(card, "title"):
+        listing.title = title
+    if price := _first(PRICE_RE, _da_text(card, "price")):
+        listing.asking_price_sgd = price
+    if area := _first(AREA_RE, _da_text(card, "area")):
+        listing.area_sqft = area
+    if psf := _first(PSF_RE, _da_text(card, "psf")):
+        listing.price_psf = psf
+    if tenure := _da_text(card, "tenure"):
+        listing.tenure = tenure
+    if beds := _da_text(card, "bedrooms"):
+        listing.bedrooms = beds
+    if baths := _da_text(card, "bathrooms"):
+        listing.bathrooms = baths
+    if mrt := _da_text(card, "mrt"):
+        listing.mrt_proximity = mrt
+
+    if not listing.title:
+        listing.title = _query_text(card, TITLE_SELECTORS)
     address = _query_text(card, ADDRESS_SELECTORS)
     listing.location = ", ".join(p for p in [listing.title, address] if p) or address
 
-    # Cards often show bed/bath counts as bare numbers beside icons, which
-    # the regexes above can't label — recover them from dedicated elements.
+    # Older layouts show bed/bath counts as bare numbers beside icons —
+    # recover them from dedicated elements if still missing.
     if not listing.bedrooms:
         listing.bedrooms = re.sub(r"\D", "", _query_text(card, BED_SELECTORS))
     if not listing.bathrooms:

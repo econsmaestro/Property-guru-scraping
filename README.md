@@ -50,6 +50,19 @@ on their phones — filters, sorting, and listing links included:
    `property-guru-scraping.vercel.app` to send to the family.
 4. Every future export + push updates the site automatically.
 
+### Fully automatic updates
+
+Two ways to keep the live site fresh without manual steps:
+
+- In the web app, tick **"publish to live site when done"** before
+  clicking Start — the scrape then exports and pushes by itself, so the
+  moment it finishes, the family link shows the new data.
+- Schedule `autoupdate.py` (scrape → export → publish in one command) to
+  run daily with Windows Task Scheduler:
+  `python autoupdate.py --max-pages 10 --districts D15,D19 --headful`
+  If a run fails or gets blocked, nothing is published and the site
+  keeps the previous good data.
+
 Note: the hosted page is public to anyone with the URL. It only contains
 the listings table — never put anything private in it.
 

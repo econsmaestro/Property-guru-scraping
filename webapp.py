@@ -25,6 +25,7 @@ from flask import Flask, jsonify, render_template_string, request
 
 from districts import DISTRICTS
 from export_static import export_page
+from publish import git_publish
 
 HERE = Path(__file__).resolve().parent
 SCRAPER = HERE / "propertyguru_scraper.py"
@@ -44,7 +45,12 @@ state = {
 # ----------------------------------------------------------------- backend
 
 
-def run_scrape(districts: list[str], max_pages: int) -> None:
+def _log(line: str) -> None:
+    with state_lock:
+        state["log"].append(line)
+
+
+def run_scrape(districts: list[str], max_pages: int, publish_when_done: bool = False) -> None:
     cmd = [
         sys.executable, "-u", str(SCRAPER),
         "--headful",
@@ -74,14 +80,26 @@ def run_scrape(districts: list[str], max_pages: int) -> None:
         with state_lock:
             state["log"].append(line.rstrip())
     proc.wait()
+    _log("Scrape finished." if proc.returncode == 0
+         else "Scrape ended without results - see messages above.")
+
+    if publish_when_done and proc.returncode == 0 and (HERE / OUTPUT).exists():
+        _log("Auto-publish: exporting page...")
+        try:
+            count = export_page(HERE / OUTPUT, HERE / "docs" / "index.html")
+            _log(f"Auto-publish: exported {count} listings, pushing to GitHub...")
+            ok, msg = git_publish()
+            _log("Auto-publish: done - live site updates in about a minute."
+                 if ok else f"Auto-publish FAILED: {msg}")
+        except Exception as exc:
+            _log(f"Auto-publish FAILED: {exc}")
+    elif publish_when_done:
+        _log("Auto-publish skipped - the scrape did not produce results.")
+
     with state_lock:
         state["running"] = False
         state["exit_code"] = proc.returncode
         state["proc"] = None
-        state["log"].append(
-            "Scrape finished." if proc.returncode == 0
-            else "Scrape ended without results - see messages above."
-        )
 
 
 @app.post("/start")
@@ -93,6 +111,8 @@ def start():
     except (TypeError, ValueError):
         max_pages = 5
 
+    publish_when_done = bool(data.get("publish_when_done"))
+
     with state_lock:
         if state["running"]:
             return jsonify({"ok": False, "error": "A scrape is already running"}), 409
@@ -100,8 +120,10 @@ def start():
         state["exit_code"] = None
         state["log"] = ["Starting scrape" +
                         (f" for {', '.join(districts)}" if districts else " (all districts)") +
-                        f", {max_pages} page(s)..."]
-    threading.Thread(target=run_scrape, args=(districts, max_pages), daemon=True).start()
+                        f", {max_pages} page(s)" +
+                        (", auto-publish ON" if publish_when_done else "") + "..."]
+    threading.Thread(target=run_scrape, args=(districts, max_pages, publish_when_done),
+                     daemon=True).start()
     return jsonify({"ok": True})
 
 
@@ -175,19 +197,9 @@ def set_siteurl():
 @app.post("/publish")
 def publish():
     """Commit and push docs/index.html so the hosted site updates."""
-    steps = [
-        ["git", "add", "docs/index.html"],
-        ["git", "commit", "-m", "Update shared listings page"],
-        ["git", "push"],
-    ]
-    for cmd in steps:
-        r = subprocess.run(cmd, cwd=str(HERE), capture_output=True, text=True)
-        if r.returncode != 0:
-            msg = (r.stdout + r.stderr).strip()
-            if cmd[1] == "commit" and "nothing to commit" in msg:
-                continue  # page unchanged since last publish — push anyway
-            return jsonify({"ok": False, "error": msg[-600:]}), 500
-    return jsonify({"ok": True})
+    ok, msg = git_publish()
+    return (jsonify({"ok": True}) if ok
+            else (jsonify({"ok": False, "error": msg}), 500))
 
 
 @app.post("/quit")
@@ -274,6 +286,9 @@ PAGE = """<!doctype html>
       <span class="hint">(~20 listings per page)</span>
       <button class="primary" id="startBtn" onclick="startScrape()">Start scraping</button>
       <button class="danger" id="stopBtn" onclick="stopScrape()" disabled>Stop</button>
+      <label class="hint" style="display:flex;align-items:center;gap:5px">
+        <input type="checkbox" id="autopub"> publish to live site when done
+      </label>
       <span class="hint" id="runhint"></span>
     </div>
     <p class="hint">A Chrome window opens on this computer while scraping. If it asks you to
@@ -369,7 +384,8 @@ async function startScrape() {
   const picked = [...document.querySelectorAll("#districts input:checked")].map(c => c.value);
   const res = await fetch("/start", {method: "POST",
     headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({districts: picked, max_pages: +$("pages").value || 5})});
+    body: JSON.stringify({districts: picked, max_pages: +$("pages").value || 5,
+                          publish_when_done: $("autopub").checked})});
   if (!res.ok) { alert((await res.json()).error || "Could not start"); return; }
   setRunning(true);
   if (!polling) poll();
